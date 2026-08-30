@@ -2,137 +2,142 @@
 app.py
 ------
 A small Flask web app: upload a rice leaf photo in the browser, get back
-the predicted disease with confidence scores and localized text.
+the predicted disease with confidence scores.
+
+Setup:
+    pip install flask tensorflow pillow numpy
+
+Before running, make sure these two files (produced by train.py) are in
+this same folder:
+    - rice_model.keras
+    - class_names.json
+
+Run:
+    python app.py
+
+Then open http://127.0.0.1:5000 in your browser.
 """
 
-import io
-import cv2
-import numpy as np
-from flask import Flask, render_template, request, jsonify
-import torch # or import tensorflow as tf
-from db import log_prediction # cite: 5
-
-import io
 import json
-import cv2
+import os
+import uuid
+
 import numpy as np
-import tensorflow as tf
-from flask import Flask, render_template, request, jsonify
-from db import log_prediction  # cite: 5
+from flask import Flask, jsonify, render_template, request
+from werkzeug.utils import secure_filename
+
+# Reuse the existing SQLite logging module if it's present in this folder.
+try:
+    import db as prediction_db
+    HAS_DB = True
+except ImportError:
+    HAS_DB = False
+
+MODEL_PATH = os.environ.get("RICE_MODEL_PATH", "rice_model.keras")
+CLASS_NAMES_PATH = os.environ.get("RICE_CLASS_NAMES_PATH", "class_names.json")
+UPLOAD_DIR = "uploads"
+IMG_SIZE = 224
+ALLOWED_EXT = {"png", "jpg", "jpeg", "bmp", "webp"}
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB max upload
 
-# 1. Load your actual Keras model and class labels
-model = tf.keras.models.load_model('rice_model.keras')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-with open('class_names.json', 'r') as f:
-    CLASS_NAMES = json.load(f)  # ['Bacterial_leaf_blight', 'Brown_spot', 'Healthy', 'Leaf_Blast', 'Tungro']
+_model = None
+_class_names = None
 
-# Map class names to TREATMENT_DB keys
-CLASS_LABEL_MAP = {
-    'Bacterial_leaf_blight': 'Bacterial leaf blight',
-    'Brown_spot': 'Brown spot',
-    'Healthy': 'Healthy',
-    'Leaf_Blast': 'Leaf Blast',
-    'Tungro': 'Tungro'
-}
 
-app = Flask(__name__)
+def get_model():
+    """Lazy-load the TensorFlow model on first request (keeps app startup fast)."""
+    global _model, _class_names
+    if _model is None:
+        import tensorflow as tf  # imported here so the app can still boot if TF is missing
 
-TREATMENT_DB = {
-    'Bacterial leaf blight': {
-        'en': {'name': 'Bacterial Leaf Blight', 'severity': 'Critical', 'tips': ['Drain the field immediately.', 'Apply copper-based bactericides.']},
-        'hi': {'name': 'जीवाणु झुलसा (Bacterial Blight)', 'severity': 'गंभीर', 'tips': ['खेत से तुरंत पानी निकालें।', 'कॉपर-आधारित कीटनाशक का प्रयोग करें।']},
-        'kn': {'name': 'ಬ್ಯಾಕ್ಟೀರಿಯಾ ಎಲೆ ರೋಗ', 'severity': 'ತೀವ್ರ', 'tips': ['ತಕ್ಷಣ ಗದ್ದೆಯಿಂದ ನೀರು ತೆಗೆಯಿರಿ.', 'ತಾಮ್ರ ಆಧಾರಿತ ಔಷಧಿ ಬಳಸಿ.']}
-    },
-    'Brown spot': {
-        'en': {'name': 'Brown Spot', 'severity': 'Moderate', 'tips': ['Apply balanced nutrients.', 'Use Mancozeb if severe.']},
-        'hi': {'name': 'भूरा धब्बा (Brown Spot)', 'severity': 'मध्यम', 'tips': ['संतुलित पोषक तत्वों का प्रयोग करें।', 'गंभीर होने पर मैन्कोज़ेब का उपयोग करें।']},
-        'kn': {'name': 'ಕಂದು ಚುಕ್ಕೆ ರೋಗ', 'severity': 'ಸಾಧಾರಣ', 'tips': ['ಸಮತೋಲಿತ ಪೋಷಕಾಂಶಗಳನ್ನು ಬಳಸಿ.', 'ತೀವ್ರವಾಗಿದ್ದರೆ ಮ್ಯಾಂಕೋಜೆಬ್ ಬಳಸಿ.']}
-    },
-    'Healthy': {
-        'en': {'name': 'Healthy Leaf', 'severity': 'None', 'tips': ['Maintain current watering schedule.', 'Keep up regular field scouting.']},
-        'hi': {'name': 'स्वस्थ पत्ता', 'severity': 'कोई नहीं', 'tips': ['वर्तमान सिंचाई बनाए रखें।', 'नियमित खेत की जाँच करते रहें।']},
-        'kn': {'name': 'ಆರೋಗ್ಯಕರ ಎಲೆ', 'severity': 'ಇಲ್ಲ', 'tips': ['ಪ್ರಸ್ತುತ ನೀರಾವರಿ ನಿರ್ವಹಿಸಿ.', 'ನಿಯಮಿತ ಗದ್ದೆ ತಪಾಸಣೆ ಮುಂದುವರಿಸಿ.']}
-    },
-    'Leaf Blast': {
-        'en': {'name': 'Leaf Blast', 'severity': 'High', 'tips': ['Apply tricyclazole fungicides.', 'Manage nitrogen carefully.']},
-        'hi': {'name': 'लीफ ब्लास्ट (झोंका रोग)', 'severity': 'उच्च', 'tips': ['ट्राइसाइक्लाजोल कवकनाशी का प्रयोग करें।', 'नाइट्रोजन का ध्यान रखें।']},
-        'kn': {'name': 'ಎಲೆ ಬೆಂಕಿ ರೋಗ', 'severity': 'ಹೆಚ್ಚು', 'tips': ['ಟ್ರೈಸೈಕ್ಲಜೋಲ್ ಶಿಲೀಂಧ್ರನಾಶಕ ಬಳಸಿ.', 'ಸಾರಜನಕವನ್ನು ಎಚ್ಚರಿಕೆಯಿಂದ ನಿರ್ವಹಿಸಿ.']}
-    },
-    'Tungro': {
-        'en': {'name': 'Tungro', 'severity': 'Severe', 'tips': ['Uproot infected plants.', 'Control green leafhoppers.']},
-        'hi': {'name': 'टुंग्रो रोग', 'severity': 'बहुत गंभीर', 'tips': ['संक्रमित पौधों को उखाड़ दें।', 'हरे फुदके (लीफहॉपर) को नियंत्रित करें।']},
-        'kn': {'name': 'ತುಂಗ್ರೋ ರೋಗ', 'severity': 'ಅತಿ ತೀವ್ರ', 'tips': ['ಸೋಂಕಿತ ಸಸ್ಯಗಳನ್ನು ಕೀಳರಿ.', 'ಹಸಿರು ಜಿಗಿಹುಳುಗಳನ್ನು ನಿಯಂತ್ರಿಸಿ.']}
-    }
-}
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(
+                f"Model file '{MODEL_PATH}' not found. Train it first with train.py, "
+                f"or set RICE_MODEL_PATH to point at your .keras file."
+            )
+        if not os.path.exists(CLASS_NAMES_PATH):
+            raise FileNotFoundError(
+                f"'{CLASS_NAMES_PATH}' not found. It's created automatically by train.py."
+            )
+        _model = tf.keras.models.load_model(MODEL_PATH)
+        with open(CLASS_NAMES_PATH) as f:
+            _class_names = json.load(f)
+    return _model, _class_names
 
-def is_foliage_present(image_bytes):
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return False
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_green = np.array([25, 35, 35])
-    upper_green = np.array([85, 255, 255])
-    mask = cv2.inRange(hsv, lower_green, upper_green)
-    foliage_ratio = np.count_nonzero(mask) / (img.shape[0] * img.shape[1])
-    return foliage_ratio >= 0.05
 
-@app.route('/')
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
+def run_prediction(image_path):
+    import tensorflow as tf
+
+    model, class_names = get_model()
+
+    img = tf.keras.utils.load_img(image_path, target_size=(IMG_SIZE, IMG_SIZE))
+    arr = tf.keras.utils.img_to_array(img)
+    arr = np.expand_dims(arr, axis=0)
+
+    preds = model.predict(arr, verbose=0)[0]
+    order = np.argsort(preds)[::-1]
+
+    results = [
+        {"label": class_names[i], "confidence": round(float(preds[i]) * 100, 2)}
+        for i in order
+    ]
+    return results
+
+
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/predict', methods=['POST'])
+
+@app.route("/predict", methods=["POST"])
 def predict():
-    if 'image' not in request.files:
-        return jsonify({'is_leaf': False, 'message': 'No image uploaded.'}), 400
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded."}), 400
 
-    file = request.files['image']
-    img_bytes = file.read()
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected."}), 400
+    if not allowed_file(file.filename):
+        return jsonify({"error": "Unsupported file type. Use JPG, PNG, BMP, or WEBP."}), 400
 
-    if not is_foliage_present(img_bytes):
-        return jsonify({
-            'is_leaf': False,
-            'message': 'No leaf detected in frame. Please center a plant leaf and try again.'
-        }), 200
+    filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
+    save_path = os.path.join(UPLOAD_DIR, filename)
+    file.save(save_path)
 
-    # 2. Preprocess image for Keras model
-    nparr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # Resize according to target dimensions used during training (typically 224x224)
-    img_resized = cv2.resize(img_rgb, (224, 224))
-    img_array = np.expand_dims(img_resized, axis=0) / 255.0
+    try:
+        results = run_prediction(save_path)
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": f"Prediction failed: {e}"}), 500
 
-    # 3. Model Prediction
-    preds = model.predict(img_array)[0]
-    top_idx = int(np.argmax(preds))
-    
-    raw_key = CLASS_NAMES[top_idx]
-    top_disease = CLASS_LABEL_MAP.get(raw_key, raw_key)
-    confidence = float(preds[top_idx])
-    
-    # Build complete probabilities dict
-    all_probs = {CLASS_LABEL_MAP.get(k, k): float(v) for k, v in zip(CLASS_NAMES, preds)}
+    top = results[0]
 
-    # Log to SQLite DB[cite: 5]
-    log_prediction(file.filename, raw_key, confidence, all_probs)
+    if HAS_DB:
+        all_probs = {r["label"]: r["confidence"] / 100.0 for r in results}
+        prediction_db.log_prediction(save_path, top["label"], top["confidence"] / 100.0, all_probs)
 
-    localizations = TREATMENT_DB.get(top_disease, TREATMENT_DB['Healthy'])
-    
     return jsonify({
-        'is_leaf': True,
-        'is_confident': confidence >= 0.60,
-        'top_confidence': round(confidence * 100, 1),
-        'raw_label': top_disease,
-        'locales': localizations,
-        'breakdown': [
-            {'label': k, 'confidence': round(v * 100, 1)} 
-            for k, v in sorted(all_probs.items(), key=lambda x: x[1], reverse=True)
-        ]
+        "top_label": top["label"],
+        "top_confidence": top["confidence"],
+        "breakdown": results,
+        "image_url": f"/{save_path}",
     })
 
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+
+@app.route("/uploads/<path:filename>")
+def uploaded_file(filename):
+    from flask import send_from_directory
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
+if __name__ == "__main__":
+    app.run(debug=True, host="127.0.0.1", port=5000)
