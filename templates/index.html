@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Leaf Scout | Field Diagnostics</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="pd-app" id="pdApp">
+  <div class="pd-eyebrow">
+    <span>Field Diagnostics</span>
+    <span id="pdDateStamp"></span>
+  </div>
+  <h1 class="pd-title">Leaf Scout</h1>
+  <p class="pd-sub">Point your camera at a leaf or upload a photo to generate an instant diagnostic specimen card.</p>
+
+  <div class="pd-frame-wrapper">
+    <div class="pd-frame" id="pdFrame">
+      <video id="pdVideo" autoplay playsinline muted class="pd-hidden"></video>
+      <canvas id="pdCanvas" class="pd-hidden"></canvas>
+      <img id="pdShot" class="pd-hidden" alt="Captured leaf" />
+      
+      <div class="pd-idle-msg" id="pdIdleMsg">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#F1ECDE" stroke-width="1.4">
+          <path d="M3 8a2 2 0 012-2h2l1.2-1.6A2 2 0 0110 3.6h4a2 2 0 011.8.8L17 6h2a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/>
+          <circle cx="12" cy="13" r="3.5"/>
+        </svg>
+        <p>Camera is off. Start it to line up a leaf, or upload a photo from your device.</p>
+      </div>
+
+      <div class="pd-corner tl"></div>
+      <div class="pd-corner tr"></div>
+      <div class="pd-corner bl"></div>
+      <div class="pd-corner br"></div>
+
+      <div class="pd-analyzing pd-hidden" id="pdAnalyzing">
+        <div class="pd-spinner"></div>
+        <span id="pdAnalyzingText">READING SYMPTOMS…</span>
+      </div>
+    </div>
+
+    <div class="pd-controls" id="pdControls">
+      <button class="pd-btn pd-btn-primary" id="pdMainBtn">Start camera</button>
+    </div>
+    
+    <div class="pd-upload-row">
+      <label class="pd-upload-label" id="pdUploadLabel">or upload a photo from your device</label>
+      <input type="file" accept="image/png, image/jpeg, image/webp, image/bmp" id="pdFileInput" style="display:none" />
+    </div>
+
+    <div id="pdErrorBox"></div>
+    <div id="pdResults"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
